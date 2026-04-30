@@ -1,0 +1,355 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <graphics.h>  // EasyX图形库头文件
+#include <conio.h>     // 键盘输入输出头文件
+#include <windows.h>   // Windows API（用于Sleep和GetTickCount）
+#include <iostream> 
+#include <ctime>
+#include <stdio.h> 
+
+#include <mmsystem.h>  // 多媒体设备接口头文件（播放音乐）
+#pragma comment(lib, "winmm.lib")   // 链接音乐库
+#pragma comment(lib, "Msimg32.lib") // 链接透明贴图库
+
+// --- 游戏常量定义 ---
+#define WIN_WIDTH 840  // 窗口宽度
+#define WIN_HEIGHT 600 // 窗口高度
+#define SIZE 40        // 每个格子的尺寸（蛇身和食物）
+#define WIDTH 21       // 地图横向格子数量
+#define HEIGHT 14      // 地图纵向格子数量
+#define TOP_MARGIN 40  // 顶部UI留出的空白高度
+#define HEAD_SIZE 60   // 蛇头图片的显示尺寸（比格子大一点更美观）
+#define OFFSET ((HEAD_SIZE - SIZE) / 2) // 蛇头渲染时的偏移量
+
+// --- 全局变量 ---
+int gameState = 0;   // 核心状态机：0菜单, 1提示, 2难度, 3战斗中, 4结算, 5退出
+int gameLevel = 0;   // 难度级别：0简单, 1困难
+int highScore = 0;   // 历史最高分
+struct Food { int x, y, type; }; // 食物结构体：坐标和类型
+int Blocks[WIDTH][HEIGHT] = { 0 }; // 地图数组：0为空，1为蛇头，>1为蛇身（数值越大代表越靠近尾部）
+char moveDirection, oldMoveDirection; // 移动方向控制
+int isFailure = 0, health = 100, speedThreshold = 8, score = 0; // 游戏状态数值
+DWORD lastTime;      // 用于计时的变量
+
+// 图像资源变量
+IMAGE bkImg, headImg, bodyImg, menuImg, tipsImg, levelImg, gameoverImg;
+IMAGE rankA, rankB, rankC;
+IMAGE foodImgs[4];
+Food foods[3];
+
+// --- 函数声明 ---
+void initGame();
+void initSnake();
+void showUI();
+void checkInputUI();
+void showGame();
+void updateWithInput();
+void updateWithoutInput();
+void moveSnake();
+void drawTransparentImg(IMAGE* pimg, int x, int y, int w, int h);
+void resetFood(int index);
+void MakeCircleImage(IMAGE* pImg);
+
+// --- 音频播放函数 ---
+void changeBGM(const char* fileName, bool loop = true) {
+    mciSendString("stop currentbgm", NULL, 0, NULL);
+    mciSendString("close currentbgm", NULL, 0, NULL);
+    char cmd[128];
+    sprintf(cmd, "open %s alias currentbgm", fileName);
+    mciSendString(cmd, NULL, 0, NULL);
+    if (loop) mciSendString("play currentbgm repeat", NULL, 0, NULL);
+    else mciSendString("play currentbgm", NULL, 0, NULL);
+}
+
+// 播放短促音效
+void playSFX(int type) {
+    char cmd[64];
+    sprintf(cmd, "play sfx_%d from 0", type);
+    mciSendString(cmd, NULL, 0, NULL);
+}
+
+// --- 程序主入口 ---
+int main() {
+    srand((unsigned)time(NULL)); // 初始化随机数种子
+    initGame(); // 资源初始化
+    while (1) {
+        if (gameState != 3) { // 如果不是在战斗中，显示UI界面
+            showUI();
+            checkInputUI();
+        }
+        else {              // 如果在战斗中，运行游戏逻辑
+            showGame();
+            updateWithoutInput();
+            updateWithInput();
+        }
+        Sleep(50); // 控制帧率，防止CPU占用过高
+    }
+    return 0;
+}
+
+// 初始化游戏资源
+void initGame() {
+    initgraph(WIN_WIDTH, WIN_HEIGHT); // 创建窗口
+    // 加载各类界面背景图
+    loadimage(&bkImg, "background.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&menuImg, "menu.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&tipsImg, "tips.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&levelImg, "level.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&rankA, "rankA.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&rankB, "rankB.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&rankC, "rankC.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&gameoverImg, "gameover.jpg", WIN_WIDTH, WIN_HEIGHT);
+    loadimage(&headImg, "head.png");
+    loadimage(&bodyImg, "body.png", SIZE, SIZE);
+
+    // 加载食物图片并裁剪成圆形
+    for (int i = 0; i < 4; i++) {
+        char cmd[100];
+        sprintf(cmd, "open eat_%d.mp3 alias sfx_%d", i, i);
+        mciSendString(cmd, NULL, 0, NULL);
+        char fileName[20];
+        sprintf(fileName, "food_%d.png", i);
+        loadimage(&foodImgs[i], fileName, SIZE, SIZE);
+        MakeCircleImage(&foodImgs[i]);
+    }
+    changeBGM("menu_bgm.mp3");
+    initSnake(); // 初始化蛇的数据
+    BeginBatchDraw(); // 开启批量绘图，防止闪烁
+}
+
+// 重置蛇的数据（开局或重玩）
+void initSnake() {
+    for (int i = 0; i < WIDTH; i++) for (int j = 0; j < HEIGHT; j++) Blocks[i][j] = 0;
+    moveDirection = oldMoveDirection = 'd'; // 默认向右
+    Blocks[WIDTH / 2][HEIGHT / 2] = 1; // 设置蛇头位置
+    for (int i = 1; i < 4; i++) Blocks[WIDTH / 2 - i][HEIGHT / 2] = i + 1; // 设置初始蛇身
+    score = 0; health = 100; speedThreshold = 8; isFailure = 0;
+    lastTime = GetTickCount();
+}
+
+// 绘制非游戏界面的UI
+void showUI() {
+    cleardevice();
+    setbkmode(TRANSPARENT);
+    settextcolor(RGB(245, 245, 220));
+
+    if (gameState == 0) { // 菜单界面
+        putimage(0, 0, &menuImg);
+        settextstyle(60, 0, "Comic Sans MS", 0, 0, FW_BOLD, false, false, false);
+        outtextxy(WIN_WIDTH / 2 - 180, 480, "PLAY");
+        outtextxy(WIN_WIDTH / 2 + 60, 480, "EXIT");
+    }
+    else if (gameState == 1) { // 提示界面
+        putimage(0, 0, &tipsImg);
+        settextstyle(90, 0, "Comic Sans MS", 0, 0, FW_BOLD, false, false, false);
+        outtextxy(WIN_WIDTH - 200, 30, "OK");
+    }
+    else if (gameState == 2) { // 难度选择界面
+        putimage(0, 0, &levelImg);
+        settextstyle(75, 0, "华文琥珀", 0, 0, FW_BOLD, false, false, false);
+        outtextxy(80, 200, "EASY"); // 坐标平移至左侧
+        outtextxy(80, 350, "DIFFICULT");
+    }
+    else if (gameState == 4) { // 结算评价界面
+        if (score < 150) putimage(0, 0, &rankC);
+        else if (score <= 300) putimage(0, 0, &rankB);
+        else putimage(0, 0, &rankA);
+
+        settextstyle(75, 0, "Comic Sans MS", 0, 0, FW_BOLD, false, false, false);
+        outtextxy(280, 320, "REPLAY");
+        outtextxy(280, 460, "QUIT");
+    }
+    else if (gameState == 5) { // 彻底退出确认界面
+        putimage(0, 0, &gameoverImg);
+        settextstyle(70, 0, "Comic Sans MS", 0, 0, FW_BOLD, false, false, false);
+        settextcolor(RGB(255, 215, 0));
+        char hs[50];
+        sprintf(hs, "BEST: %d", highScore);
+        outtextxy(WIN_WIDTH / 2 - 150, WIN_HEIGHT / 2 - 20, hs);
+        settextstyle(25, 0, "Comic Sans MS");
+        settextcolor(WHITE);
+        outtextxy(WIN_WIDTH / 2 - 120, WIN_HEIGHT - 60, "Press Any Key to Exit");
+    }
+    FlushBatchDraw();
+}
+
+// 检查UI界面下的鼠标点击
+void checkInputUI() {
+    ExMessage msg;
+    if (peekmessage(&msg, EM_MOUSE)) {
+        if (msg.message == WM_LBUTTONDOWN) {
+            if (gameState == 0) {
+                if (msg.y > 470 && msg.y < 540) {
+                    if (msg.x > WIN_WIDTH / 2 - 200 && msg.x < WIN_WIDTH / 2 - 50) gameState = 1;
+                    else if (msg.x > WIN_WIDTH / 2 + 40 && msg.x < WIN_WIDTH / 2 + 180) exit(0);
+                }
+            }
+            else if (gameState == 1) {
+                if (msg.x > WIN_WIDTH - 220 && msg.x < WIN_WIDTH - 20 && msg.y > 20 && msg.y < 140) gameState = 2;
+            }
+            else if (gameState == 2) {
+                if (msg.x > 80 && msg.x < 480) { // 判定区域同步左移
+                    if (msg.y > 200 && msg.y < 300) { gameLevel = 0; gameState = 3; changeBGM("playbgm.mp3"); initSnake(); for (int i = 0; i < 3; i++) resetFood(i); }
+                    else if (msg.y > 350 && msg.y < 450) { gameLevel = 1; gameState = 3; changeBGM("playbgm.mp3"); initSnake(); for (int i = 0; i < 3; i++) resetFood(i); }
+                }
+            }
+            else if (gameState == 4) {
+                if (msg.x > 280 && msg.x < 600) {
+                    if (msg.y > 320 && msg.y < 420) { gameState = 2; changeBGM("menu_bgm.mp3"); }
+                    else if (msg.y > 460 && msg.y < 560) { gameState = 5; mciSendString("stop currentbgm", NULL, 0, NULL); }
+                }
+            }
+        }
+    }
+    if (gameState == 5 && _kbhit()) exit(0);
+}
+
+// 绘制游戏战斗画面
+void showGame() {
+    cleardevice();
+    putimage(0, 0, &bkImg);
+    settextcolor(RGB(245, 245, 220));
+    settextstyle(28, 0, "华文琥珀", 0, 0, FW_BOLD, false, false, false);
+    char s[100];
+    sprintf(s, "HP: %d  SPEED: %d  SCORE: %d", health, 12 - speedThreshold, score);
+    outtextxy(20, 8, s);
+
+    // 绘制食物
+    for (int i = 0; i < 3; i++) drawTransparentImg(&foodImgs[foods[i].type], foods[i].x * SIZE, foods[i].y * SIZE + TOP_MARGIN, SIZE, SIZE);
+
+    // 根据数组中的数值绘制蛇头和蛇身
+    for (int i = 0; i < WIDTH; i++) {
+        for (int j = 0; j < HEIGHT; j++) {
+            if (Blocks[i][j] != 0) {
+                int posX = i * SIZE, posY = j * SIZE + TOP_MARGIN;
+                if (Blocks[i][j] == 1) drawTransparentImg(&headImg, posX - OFFSET, posY - OFFSET, HEAD_SIZE, HEAD_SIZE);
+                else drawTransparentImg(&bodyImg, posX, posY, SIZE, SIZE);
+            }
+        }
+    }
+
+    // 死亡处理
+    if (isFailure) {
+        if (score > highScore) highScore = score;
+        settextcolor(YELLOW);
+        settextstyle(80, 0, "Comic Sans MS", 0, 0, FW_BOLD, false, false, false);
+        outtextxy(WIN_WIDTH / 4, WIN_HEIGHT / 2 - 40, "GAME OVER");
+        FlushBatchDraw();
+
+        // 播放结算音乐
+        if (score < 150) changeBGM("rankC_bgm.mp3");
+        else if (score <= 300) changeBGM("rankB_bgm.mp3");
+        else changeBGM("rankA_bgm.mp3");
+
+        Sleep(1500);
+        gameState = 4;
+    }
+    FlushBatchDraw();
+}
+
+// 核心移动逻辑：数值演变法控制蛇
+void moveSnake() {
+    int i, j, maxLen = 0;
+    // 寻找当前蛇的长度（Blocks里的最大值）并让身体所有数值+1
+    for (i = 0; i < WIDTH; i++) for (j = 0; j < HEIGHT; j++) if (Blocks[i][j] != 0) { Blocks[i][j]++; if (Blocks[i][j] > maxLen) maxLen = Blocks[i][j]; }
+
+    int oldHeadX, oldHeadY, oldTailX, oldTailY;
+    // 定位蛇头（原值为1，现在变成2了）和蛇尾（最大值）
+    for (i = 0; i < WIDTH; i++) for (j = 0; j < HEIGHT; j++) {
+        if (Blocks[i][j] == maxLen) { oldTailX = i; oldTailY = j; }
+        if (Blocks[i][j] == 2) { oldHeadX = i; oldHeadY = j; }
+    }
+
+    // 计算新头位置
+    int nX = oldHeadX, nY = oldHeadY;
+    switch (moveDirection) { case 'a': nX -= 1; break; case 's': nY += 1; break; case 'd': nX += 1; break; case 'w': nY -= 1; break; }
+
+                                     // 碰撞检测（墙壁或自身）
+                                     if (nX < 0 || nX >= WIDTH || nY < 0 || nY >= HEIGHT || Blocks[nX][nY] > 0) { isFailure = 1; return; }
+
+                                     Blocks[nX][nY] = 1; // 在地图上放置新蛇头
+                                     int eatenIndex = -1;
+                                     for (int k = 0; k < 3; k++) if (nX == foods[k].x && nY == foods[k].y) { eatenIndex = k; break; }
+
+                                     if (eatenIndex != -1) { // 吃到食物
+                                         playSFX(foods[eatenIndex].type);
+                                         switch (foods[eatenIndex].type) {
+                                         case 0: score += 100; for (i = 0; i < WIDTH; i++) for (j = 0; j < HEIGHT; j++) if (Blocks[i][j] > 1) Blocks[i][j] += 30; break; // 增长
+                                         case 1: speedThreshold = (speedThreshold >= 16) ? 16 : speedThreshold + 4; break; // 加速
+                                         case 2: score = (score < 20) ? 0 : score - 20; for (i = 0; i < WIDTH; i++) for (j = 0; j < HEIGHT; j++) if (Blocks[i][j] > (maxLen - 20) && Blocks[i][j] > 2) Blocks[i][j] = 0; break; // 减分缩短
+                                         case 3: isFailure = 1; break; // 毒药
+                                         }
+                                         resetFood(eatenIndex);
+                                     }
+                                     else Blocks[oldTailX][oldTailY] = 0; // 没吃到食物，蛇尾消失（维持原长度）
+}
+
+// 随机生成食物
+void resetFood(int index) {
+    int nx, ny, collision;
+    do {
+        collision = 0; nx = rand() % WIDTH; ny = rand() % HEIGHT;
+        if (Blocks[nx][ny] != 0) collision = 1; // 别长在蛇身上
+        for (int i = 0; i < 3; i++) if (i != index && foods[i].x == nx && foods[i].y == ny) collision = 1; // 别长在其他食物上
+    } while (collision);
+    foods[index].x = nx; foods[index].y = ny;
+    bool hasType0 = false;
+    for (int i = 0; i < 3; i++) if (i != index && foods[i].type == 0) hasType0 = true;
+
+    if (gameLevel == 0) {
+        if (!hasType0) foods[index].type = 0; // 简单模式：必定存在一个普通食物
+        else foods[index].type = rand() % 2;
+    }
+    else {
+        if (!hasType0) foods[index].type = 0; // 困难模式：加入毒药等类型
+        else foods[index].type = rand() % 4;
+    }
+}
+
+// 处理带Alpha通道（透明）的图片显示
+void drawTransparentImg(IMAGE* pimg, int x, int y, int w, int h) {
+    HDC dstDC = GetImageHDC(); HDC srcDC = GetImageHDC(pimg);
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    AlphaBlend(dstDC, x, y, w, h, srcDC, 0, 0, pimg->getwidth(), pimg->getheight(), bf);
+}
+
+// 将方形图片通过修改显存变为圆形（透明背景）
+void MakeCircleImage(IMAGE* pImg) {
+    int w = pImg->getwidth(); int h = pImg->getheight(); int r = w / 2;
+    DWORD* pBuf = GetImageBuffer(pImg);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int dx = x - r, dy = y - r;
+            if (dx * dx + dy * dy > r * r) pBuf[y * w + x] &= 0x00FFFFFF; // 圆外区域透明度设为0
+        }
+    }
+}
+
+// 监听键盘方向输入
+void updateWithInput() {
+    if (_kbhit() && isFailure == 0) {
+        char input = _getch();
+        if (input == 'a' || input == 's' || input == 'd' || input == 'w') {
+            // 禁止直接180度回头
+            if (!((input == 'a' && oldMoveDirection == 'd') || (input == 'd' && oldMoveDirection == 'a') ||
+                (input == 'w' && oldMoveDirection == 's') || (input == 's' && oldMoveDirection == 'w'))) {
+                moveDirection = input; oldMoveDirection = input;
+            }
+        }
+    }
+}
+
+// 自动随时间更新的逻辑（移动、体力衰减）
+void updateWithoutInput() {
+    if (isFailure) return;
+    DWORD currentTime = GetTickCount();
+    if (currentTime - lastTime >= 1000) { // 每秒扣除一点体力
+        health--;
+        lastTime = currentTime;
+        if (health <= 0) isFailure = 1;
+    }
+    static int waitIndex = 1; waitIndex++;
+    if (waitIndex >= speedThreshold) { // 控制移动速度（由speedThreshold决定）
+        moveSnake();
+        waitIndex = 1;
+    }
+}
